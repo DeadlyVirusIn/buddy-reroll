@@ -221,7 +221,7 @@ function DoneStep({ messages, isActive }) {
         <Text bold>
           {hasErrors
             ? "Something went wrong — check the issue above and try again."
-            : "All set! Restart Claude Code and say /buddy to meet your new friend."}
+            : "All set! Your buddy will stick around even after updates. Restart Claude Code and say /buddy!"}
         </Text>
       </Box>
       <KeyHint>Press any key to exit</KeyHint>
@@ -247,6 +247,7 @@ function App({ opts }) {
     currentRoll, currentSalt, binaryPath, configPath, userId,
     bruteForce, patchBinary, resignBinary, clearCompanion, getPatchability, isClaudeRunning,
     rollFrom, matches, SPECIES, RARITIES, RARITY_LABELS, EYES, HATS, STAT_NAMES,
+    storeSalt, installHook,
   } = opts;
 
   const [step, setStep] = useState("action");
@@ -514,6 +515,8 @@ function App({ opts }) {
                   msgs.push({ type: "success", text: "Applied!" });
                   if (resignBinary(binaryPath)) msgs.push({ type: "success", text: "Re-signed for macOS" });
                   clearCompanion(configPath);
+                  if (storeSalt) storeSalt(found.salt);
+                  if (installHook) installHook();
                   msgs.push({ type: "success", text: "Cleaned up old buddy data" });
                 } catch (err) {
                   msgs.push({ type: "error", text: err.message });

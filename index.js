@@ -2,7 +2,7 @@
 
 import { readFileSync, writeFileSync, existsSync, copyFileSync, renameSync, unlinkSync } from "fs";
 import { platform } from "os";
-import { execFileSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 import { parseArgs } from "util";
 import chalk from "chalk";
 import { renderSprite, colorizeSprite, RARITY_STARS, RARITY_COLORS } from "./sprites.js";
@@ -27,8 +27,16 @@ import { installHook, removeHook, storeSalt, readStoredSalt } from "./lib/hooks.
 
 const IS_BUN = typeof Bun !== "undefined";
 const IS_APPLY_HOOK = process.argv.includes("--apply-hook");
+
 if (!IS_BUN && !IS_APPLY_HOOK) {
-  console.warn("⚠ Running without Bun — searching will be a bit slower. For the speediest experience: https://bun.sh");
+  try {
+    const cmd = platform() === "win32" ? "where.exe" : "which";
+    const bunPath = execFileSync(cmd, ["bun"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim().split("\n")[0];
+    if (bunPath) {
+      const result = spawnSync(bunPath, process.argv.slice(1), { stdio: "inherit" });
+      process.exit(result.status ?? 0);
+    }
+  } catch {}
 }
 
 function getUserId(configPath) {
@@ -89,7 +97,17 @@ function patchBinary(binaryPath, oldSalt, newSalt) {
     try {
       const tmpPath = binaryPath + ".tmp";
       writeFileSync(tmpPath, data);
-      renameSync(tmpPath, binaryPath);
+      try {
+        renameSync(tmpPath, binaryPath);
+      } catch {
+        try { unlinkSync(binaryPath); } catch {}
+        renameSync(tmpPath, binaryPath);
+      }
+
+      const verify = readFileSync(binaryPath);
+      const found = verify.indexOf(Buffer.from(newSalt));
+      if (found === -1) throw new Error("Patch verification failed — new salt not found after write");
+
       return count;
     } catch (err) {
       try { unlinkSync(binaryPath + ".tmp"); } catch {}
@@ -97,7 +115,10 @@ function patchBinary(binaryPath, oldSalt, newSalt) {
         sleepMs(2000);
         continue;
       }
-      throw new Error(`Failed to write binary: ${err.message}${isWin ? " (ensure Claude Code is fully closed)" : ""}`);
+      if (isWin && (err.code === "EPERM" || err.code === "EBUSY")) {
+        throw new Error("Can't write — Claude Code might still be running. Close it and try again.");
+      }
+      throw new Error(`Failed to write: ${err.message}`);
     }
   }
 }
@@ -106,10 +127,12 @@ function resignBinary(binaryPath) {
   if (platform() !== "darwin") return false;
   try {
     execFileSync("codesign", ["-s", "-", "--force", binaryPath], {
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30000,
     });
     return true;
-  } catch {
+  } catch (err) {
+    console.warn(`  ⚠ Code signing failed: ${err.message}\n    Try manually: codesign --force --sign - "${binaryPath}"`);
     return false;
   }
 }
@@ -130,7 +153,32 @@ function fail(message) {
 
 function readCurrentCompanion(binaryPath, userId) {
   const binaryData = readFileSync(binaryPath);
-  const currentSalt = findCurrentSalt(binaryData);
+  let currentSalt = findCurrentSalt(binaryData);
+
+  if (!currentSalt) {
+    const stored = readStoredSalt();
+    if (stored) {
+      const storedBuf = Buffer.from(stored.salt);
+      if (binaryData.includes(storedBuf)) {
+        currentSalt = stored.salt;
+      }
+    }
+  }
+
+  if (!currentSalt) {
+    const backupPath = binaryPath + ".backup";
+    if (existsSync(backupPath)) {
+      console.log("  ⚠ Can't find salt in binary — restoring from backup...");
+      try {
+        copyFileSync(backupPath, binaryPath);
+        resignBinary(binaryPath);
+        const restored = readFileSync(binaryPath);
+        currentSalt = findCurrentSalt(restored);
+        if (currentSalt) console.log("  ✓ Restored successfully.");
+      } catch {}
+    }
+  }
+
   if (!currentSalt) fail("  ✗ Couldn't read your current buddy from the Claude binary.");
   return { currentSalt, currentRoll: rollFrom(currentSalt, userId) };
 }
@@ -230,6 +278,8 @@ async function interactiveMode(binaryPath, configPath, userId) {
     EYES,
     HATS,
     STAT_NAMES,
+    storeSalt,
+    installHook,
   };
 
   try {
@@ -293,9 +343,14 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
   }
 
   console.log("  Looking for your buddy...");
-  const found = await parallelBruteForce(userId, target, (attempts, elapsed, est, workers) => {
-    process.stdout.write(`\r  ${formatProgress(attempts, elapsed, est, workers)}`);
-  });
+  let found;
+  try {
+    found = await parallelBruteForce(userId, target, (attempts, elapsed, est, workers) => {
+      process.stdout.write(`\r  ${formatProgress(attempts, elapsed, est, workers)}`);
+    });
+  } catch (err) {
+    fail(`\n  ✗ ${err.message}`);
+  }
   if (!found) fail("\n  ✗ Couldn't find a match. Try being less picky!");
   console.log(`\n  ✓ Found it! (${found.checked.toLocaleString()} tries, ${(found.elapsed / 1000).toFixed(1)}s)`);
   console.log(formatCompanionCard(found.result));
@@ -316,8 +371,9 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
     if (resignBinary(binaryPath)) console.log("  Re-signed for macOS ✓");
     clearCompanion(configPath);
     storeSalt(found.salt);
+    installHook();
     console.log("  Cleaned up old buddy data ✓");
-    console.log("\n  All set! Restart Claude Code and say /buddy to meet your new friend.\n");
+    console.log("\n  All set! Your buddy will stick around even after Claude updates.\n  Restart Claude Code and say /buddy to meet your new friend.\n");
   } catch (err) {
     fail(`  ✗ ${err.message}`);
   }
@@ -365,8 +421,7 @@ async function main() {
     buddy-reroll --current                           Show current buddy
     buddy-reroll --doctor                            Check setup
     buddy-reroll --restore                           Undo changes
-    buddy-reroll --hook                              Keep my buddy after updates
-    buddy-reroll --unhook                            Stop keeping after updates
+    buddy-reroll --unhook                            Stop auto-keeping after updates
 
   Appearance (all optional — skip to leave random):
     --species <name>    ${SPECIES.join(", ")}

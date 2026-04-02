@@ -30,6 +30,7 @@ export async function runInteractiveUI(opts) {
     currentRoll, currentSalt, binaryPath, configPath, userId,
     bruteForce, patchBinary, resignBinary, clearCompanion, getPatchability, isClaudeRunning,
     rollFrom, matches, SPECIES, RARITIES, RARITY_LABELS, EYES, HATS, STAT_NAMES,
+    storeSalt, installHook,
   } = opts;
 
   console.log(chalk.bold.dim("\n  buddy-reroll\n"));
@@ -174,7 +175,9 @@ export async function runInteractiveUI(opts) {
     if (resignBinary(binaryPath)) console.log("  Re-signed for macOS ✓");
     clearCompanion(configPath);
     console.log("  Cleaned up old buddy data ✓");
-    console.log(chalk.bold("\n  All set! Restart Claude Code and say /buddy to meet your new friend.\n"));
+    if (storeSalt) storeSalt(found.salt);
+    if (installHook) installHook();
+    console.log(chalk.bold("\n  All set! Your buddy will stick around even after Claude updates.\n  Restart Claude Code and say /buddy to meet your new friend.\n"));
   } catch (err) {
     console.log(chalk.red(`\n✗ ${err.message}`));
   }
