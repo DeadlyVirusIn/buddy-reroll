@@ -2,6 +2,13 @@
 
 Reroll your [Claude Code](https://docs.anthropic.com/en/docs/claude-code) `/buddy` companion to any species, rarity, eye, hat, and shiny combination.
 
+<img width="1390" height="1010" alt="CleanShot 2026-04-02 at 19 53 02@2x" src="https://github.com/user-attachments/assets/0786f4b8-35e2-4433-90af-25a0d9ebe1a9" />
+
+<p align="center" width="100%">
+<video src="https://github.com/user-attachments/assets/5de52c98-ce3c-428f-bd2d-7f208e1a6d38" width="80%" controls></video>
+</p>
+
+
 ## Install
 
 ```bash
