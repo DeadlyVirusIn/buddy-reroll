@@ -152,9 +152,19 @@ export async function runInteractiveUI(opts) {
   if (!proceed) return;
 
   console.log("  Looking for your buddy...");
-  const found = await bruteForce(userId, target, (checked, elapsed) => {
-    process.stdout.write(`\r  ${(checked / 1e6).toFixed(1)}M tries (${(elapsed / 1000).toFixed(1)}s)`);
-  });
+  let found;
+  try {
+    found = await bruteForce(userId, target, (attempts, elapsed, expected, workers) => {
+      const pct = Math.min(100, Math.round((attempts / expected) * 100));
+      const rate = attempts / (elapsed / 1000);
+      const rateStr = rate >= 1e6 ? `${(rate / 1e6).toFixed(1)}M` : `${(rate / 1e3).toFixed(1)}k`;
+      const eta = Math.max(0, (expected - attempts) / rate);
+      process.stdout.write(`\r  ${pct}% | ${rateStr} tries/s | ~${Math.round(eta)}s left | ${workers} cores`);
+    });
+  } catch (err) {
+    console.log(chalk.red(`\n✗ ${err.message}`));
+    return;
+  }
 
   if (!found) {
     console.log(chalk.red("\n✗ Couldn't find a match. Try being less picky!"));

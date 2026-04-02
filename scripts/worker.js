@@ -14,7 +14,13 @@ function randomSalt() {
 }
 
 const userId = process.argv[2];
-const target = JSON.parse(process.argv[3]);
+let target;
+try {
+  target = JSON.parse(process.argv[3]);
+} catch {
+  process.stderr.write("Invalid target JSON\n");
+  process.exit(1);
+}
 
 if (!userId || !target) {
   process.stderr.write("Usage: worker.js <userId> '<targetJSON>'\n");

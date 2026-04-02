@@ -183,11 +183,21 @@ function SearchStep({ userId, target, bruteForce, onFound, onFail, isActive }) {
     if (hasStarted.current) return;
     hasStarted.current = true;
     (async () => {
-      const found = await bruteForce(userId, target, (checked, elapsed) => {
-        if (!cancelRef.current) {
-          setProgress(`${(checked / 1e6).toFixed(0)}M salts checked (${(elapsed / 1000).toFixed(1)}s)`);
-        }
-      });
+      let found;
+      try {
+        found = await bruteForce(userId, target, (attempts, elapsed, expected, workers) => {
+          if (!cancelRef.current) {
+            const pct = Math.min(100, Math.round((attempts / expected) * 100));
+            const rate = attempts / (elapsed / 1000);
+            const rateStr = rate >= 1e6 ? `${(rate / 1e6).toFixed(1)}M` : `${(rate / 1e3).toFixed(1)}k`;
+            const eta = Math.max(0, (expected - attempts) / rate);
+            setProgress(`${pct}% | ${rateStr} tries/s | ~${Math.round(eta)}s left | ${workers} cores`);
+          }
+        });
+      } catch {
+        if (!cancelRef.current) onFail();
+        return;
+      }
       if (cancelRef.current) return;
       if (found) onFound(found);
       else onFail();
@@ -236,8 +246,7 @@ function getPrevStep(current, rarity, peak) {
   if (idx <= 0) return null;
   let prev = STEP_ORDER[idx - 1];
   if (prev === "hat" && rarity === "common") prev = "eye";
-  if (prev === "dump" && peak === null) prev = "shiny";
-  if (prev === "peak") prev = "shiny";
+  if (prev === "dump" && !peak) prev = "peak";
   return prev;
 }
 
@@ -395,21 +404,11 @@ function App({ opts }) {
             isActive={step === "shiny"}
             onConfirm={() => {
               setShiny(true);
-              if (matches(currentRoll, buildTarget(true))) {
-                setDoneMessages([{ type: "success", text: "Your buddy already looks like that!" }]);
-                setStep("done");
-              } else {
-                setStep("peak");
-              }
+              setStep("peak");
             }}
             onCancel={() => {
               setShiny(false);
-              if (matches(currentRoll, buildTarget(false))) {
-                setDoneMessages([{ type: "success", text: "Your buddy already looks like that!" }]);
-                setStep("done");
-              } else {
-                setStep("peak");
-              }
+              setStep("peak");
             }}
             onBack={() => goBack()}
           />
@@ -417,7 +416,7 @@ function App({ opts }) {
 
         {step === "peak" && (
           <ListSelect
-            label="Peak stat (highest)"
+            label="Best at"
             options={[
               { label: "Any (random)", value: "any" },
               ...(STAT_NAMES || []).map(s => ({ label: s, value: s })),
@@ -438,7 +437,7 @@ function App({ opts }) {
 
         {step === "dump" && (
           <ListSelect
-            label="Dump stat (lowest)"
+            label="Worst at"
             options={[
               { label: "Any (random)", value: "any" },
               ...(STAT_NAMES || []).filter(s => s !== peak).map(s => ({ label: s, value: s })),
@@ -491,7 +490,7 @@ function App({ opts }) {
 
         {step === "result" && (
           <Box flexDirection="column">
-            <Text bold color="green">✓ Found in {found.checked.toLocaleString()} attempts ({(found.elapsed / 1000).toFixed(1)}s)</Text>
+            <Text bold color="green">✓ Found your buddy! ({found.checked.toLocaleString()} tries, {(found.elapsed / 1000).toFixed(1)}s)</Text>
             <ConfirmSelect
               label="Apply patch?"
               isActive={step === "result"}

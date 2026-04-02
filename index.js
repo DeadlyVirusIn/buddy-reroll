@@ -100,7 +100,9 @@ function patchBinary(binaryPath, oldSalt, newSalt) {
       try {
         renameSync(tmpPath, binaryPath);
       } catch {
-        try { unlinkSync(binaryPath); } catch {}
+        if (existsSync(binaryPath + ".backup")) {
+          try { unlinkSync(binaryPath); } catch {}
+        }
         renameSync(tmpPath, binaryPath);
       }
 
@@ -264,7 +266,7 @@ async function interactiveMode(binaryPath, configPath, userId) {
     binaryPath,
     configPath,
     userId,
-    bruteForce,
+    bruteForce: parallelBruteForce,
     patchBinary,
     resignBinary,
     clearCompanion,
@@ -327,16 +329,16 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
   const target = buildTargetFromArgs(args);
   if (Object.keys(target).length === 0) fail("  ✗ Tell me what kind of buddy you want! Use --help to see options.");
 
-  const expected = estimateAttempts(target);
-  console.log(`  Target:  ${Object.entries(target).map(([k, v]) => `${k}=${v}`).join(" ")}`);
-  console.log(`  This might take ~${expected.toLocaleString()} tries\n`);
+  const patchability = assertPatchable(binaryPath);
 
   if (matches(currentRoll, target)) {
     console.log("  ✓ Your buddy already looks like that!\n" + formatCompanionCard(currentRoll));
     return;
   }
 
-  const patchability = assertPatchable(binaryPath);
+  const expected = estimateAttempts(target);
+  console.log(`  Target:  ${Object.entries(target).map(([k, v]) => `${k}=${v}`).join(" ")}`);
+  console.log(`  This might take ~${expected.toLocaleString()} tries\n`);
 
   if (isClaudeRunning()) {
     console.warn("  ⚠ Claude Code is still running — close it first so the changes stick.");
@@ -371,7 +373,7 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
     if (resignBinary(binaryPath)) console.log("  Re-signed for macOS ✓");
     clearCompanion(configPath);
     storeSalt(found.salt);
-    installHook();
+    try { installHook(); } catch {}
     console.log("  Cleaned up old buddy data ✓");
     console.log("\n  All set! Your buddy will stick around even after Claude updates.\n  Restart Claude Code and say /buddy to meet your new friend.\n");
   } catch (err) {
@@ -468,8 +470,17 @@ async function main() {
       if (currentSalt === stored.salt) process.exit(0);
       const patchability = getPatchability(bp);
       if (!patchability.ok) process.exit(0);
+      const backupPath = patchability.backupPath;
+      if (!existsSync(backupPath)) copyFileSync(bp, backupPath);
       patchBinary(bp, currentSalt, stored.salt);
-      resignBinary(bp);
+      if (platform() === "darwin") {
+        try {
+          execFileSync("codesign", ["-s", "-", "--force", bp], { stdio: "ignore", timeout: 30000 });
+        } catch {
+          copyFileSync(backupPath, bp);
+          process.exit(1);
+        }
+      }
       clearCompanion(cp);
     } catch {}
     process.exit(0);
