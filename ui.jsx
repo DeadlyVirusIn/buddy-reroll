@@ -196,7 +196,7 @@ function SearchStep({ userId, target, bruteForce, onFound, onFail, isActive }) {
 
   return (
     <Box flexDirection="column">
-      <Spinner label={progress || "Searching for matching salt..."} />
+      <Spinner label={progress || "Looking for your buddy..."} />
       <KeyHint>esc to cancel</KeyHint>
     </Box>
   );
@@ -220,8 +220,8 @@ function DoneStep({ messages, isActive }) {
       <Box marginTop={1}>
         <Text bold>
           {hasErrors
-            ? "Unable to finish. Resolve the issue above and try again."
-            : "Done! Restart Claude Code and run /buddy to hatch your new companion."}
+            ? "Something went wrong — check the issue above and try again."
+            : "All set! Restart Claude Code and say /buddy to meet your new friend."}
         </Text>
       </Box>
       <KeyHint>Press any key to exit</KeyHint>
@@ -229,13 +229,15 @@ function DoneStep({ messages, isActive }) {
   );
 }
 
-const STEP_ORDER = ["action", "species", "rarity", "eye", "hat", "shiny", "confirm"];
+const STEP_ORDER = ["action", "species", "rarity", "eye", "hat", "shiny", "peak", "dump", "confirm"];
 
-function getPrevStep(current, rarity) {
+function getPrevStep(current, rarity, peak) {
   const idx = STEP_ORDER.indexOf(current);
   if (idx <= 0) return null;
   let prev = STEP_ORDER[idx - 1];
   if (prev === "hat" && rarity === "common") prev = "eye";
+  if (prev === "dump" && peak === null) prev = "shiny";
+  if (prev === "peak") prev = "shiny";
   return prev;
 }
 
@@ -244,7 +246,7 @@ function App({ opts }) {
   const {
     currentRoll, currentSalt, binaryPath, configPath, userId,
     bruteForce, patchBinary, resignBinary, clearCompanion, getPatchability, isClaudeRunning,
-    rollFrom, matches, SPECIES, RARITIES, RARITY_LABELS, EYES, HATS,
+    rollFrom, matches, SPECIES, RARITIES, RARITY_LABELS, EYES, HATS, STAT_NAMES,
   } = opts;
 
   const [step, setStep] = useState("action");
@@ -253,16 +255,23 @@ function App({ opts }) {
   const [eye, setEye] = useState(currentRoll.eye);
   const [hat, setHat] = useState(currentRoll.hat);
   const [shiny, setShiny] = useState(currentRoll.shiny);
+  const [peak, setPeak] = useState(null);
+  const [dump, setDump] = useState(null);
   const [found, setFound] = useState(null);
   const [doneMessages, setDoneMessages] = useState([]);
 
   const showStats = step === "showCurrent" || step === "result" || step === "done";
   const displayRoll = found ? found.result : { species, rarity, eye, hat, shiny, stats: currentRoll.stats };
   const effectiveHat = rarity === "common" ? "none" : hat;
-  const buildTarget = (s = shiny) => ({ species, rarity, eye, hat: effectiveHat, shiny: s });
+  const buildTarget = (s = shiny) => {
+    const t = { species, rarity, eye, hat: effectiveHat, shiny: s };
+    if (peak) t.peak = peak;
+    if (dump) t.dump = dump;
+    return t;
+  };
 
   const goBack = (toStep) => {
-    const prev = toStep || getPrevStep(step, rarity);
+    const prev = toStep || getPrevStep(step, rarity, peak);
     if (prev) setStep(prev);
     else exit();
   };
@@ -303,7 +312,7 @@ function App({ opts }) {
 
                 const { backupPath } = patchability;
                 if (!existsSync(backupPath)) {
-                  setDoneMessages([{ type: "info", text: "No backup found. Nothing to restore." }]);
+                  setDoneMessages([{ type: "info", text: "No backup found — nothing to undo." }]);
                   setStep("done");
                   return;
                 }
@@ -312,7 +321,7 @@ function App({ opts }) {
                   copyFileSync(backupPath, binaryPath);
                   resignBinary(binaryPath);
                   clearCompanion(configPath);
-                  setDoneMessages([{ type: "success", text: "Restored! Restart Claude Code and run /buddy." }]);
+                  setDoneMessages([{ type: "success", text: "Restored! Restart Claude Code and say /buddy to see your original friend." }]);
                 } catch (err) {
                   setDoneMessages([{ type: "error", text: err.message }]);
                 }
@@ -386,28 +395,66 @@ function App({ opts }) {
             onConfirm={() => {
               setShiny(true);
               if (matches(currentRoll, buildTarget(true))) {
-                setDoneMessages([{ type: "success", text: "Already matching! No changes needed." }]);
+                setDoneMessages([{ type: "success", text: "Your buddy already looks like that!" }]);
                 setStep("done");
               } else {
-                setStep("confirm");
+                setStep("peak");
               }
             }}
             onCancel={() => {
               setShiny(false);
               if (matches(currentRoll, buildTarget(false))) {
-                setDoneMessages([{ type: "success", text: "Already matching! No changes needed." }]);
+                setDoneMessages([{ type: "success", text: "Your buddy already looks like that!" }]);
                 setStep("done");
               } else {
-                setStep("confirm");
+                setStep("peak");
               }
             }}
             onBack={() => goBack()}
           />
         )}
 
+        {step === "peak" && (
+          <ListSelect
+            label="Peak stat (highest)"
+            options={[
+              { label: "Any (random)", value: "any" },
+              ...(STAT_NAMES || []).map(s => ({ label: s, value: s })),
+            ]}
+            defaultValue="any"
+            onSubmit={(v) => {
+              setPeak(v === "any" ? null : v);
+              if (v === "any") {
+                setStep("confirm");
+              } else {
+                setStep("dump");
+              }
+            }}
+            onBack={() => goBack()}
+            isActive={step === "peak"}
+          />
+        )}
+
+        {step === "dump" && (
+          <ListSelect
+            label="Dump stat (lowest)"
+            options={[
+              { label: "Any (random)", value: "any" },
+              ...(STAT_NAMES || []).filter(s => s !== peak).map(s => ({ label: s, value: s })),
+            ]}
+            defaultValue="any"
+            onSubmit={(v) => {
+              setDump(v === "any" ? null : v);
+              setStep("confirm");
+            }}
+            onBack={() => goBack()}
+            isActive={step === "dump"}
+          />
+        )}
+
         {step === "confirm" && (
           <Box flexDirection="column">
-            <Text>Target: <Text bold>{species}</Text> / <Text bold>{rarity}</Text> / eye:{eye} / hat:{effectiveHat}{shiny ? " / shiny" : ""}</Text>
+            <Text>Target: <Text bold>{species}</Text> / <Text bold>{rarity}</Text> / eye:{eye} / hat:{effectiveHat}{shiny ? " / shiny" : ""}{peak ? ` / peak:${peak}` : ""}{dump ? ` / dump:${dump}` : ""}</Text>
             {isClaudeRunning() && <Text color="yellow">⚠ Claude Code appears to be running. Quit it before patching.</Text>}
             <ConfirmSelect
               label="Search and apply?"
@@ -434,7 +481,7 @@ function App({ opts }) {
             bruteForce={bruteForce}
             onFound={(f) => { setFound(f); setStep("result"); }}
             onFail={() => {
-              setDoneMessages([{ type: "error", text: "No matching salt found. Try relaxing constraints." }]);
+              setDoneMessages([{ type: "error", text: "Couldn't find a match. Try being less picky!" }]);
               setStep("done");
             }}
             isActive={step === "search"}
@@ -461,13 +508,13 @@ function App({ opts }) {
                 try {
                   if (!existsSync(backupPath)) {
                     copyFileSync(binaryPath, backupPath);
-                    msgs.push({ type: "success", text: `Backup saved to ${backupPath}` });
+                    msgs.push({ type: "success", text: `Saved a backup just in case` });
                   }
                   const count = patchBinary(binaryPath, currentSalt, found.salt);
-                  msgs.push({ type: "success", text: `Patched ${count} occurrence(s)` });
-                  if (resignBinary(binaryPath)) msgs.push({ type: "success", text: "Binary re-signed (ad-hoc codesign)" });
+                  msgs.push({ type: "success", text: "Applied!" });
+                  if (resignBinary(binaryPath)) msgs.push({ type: "success", text: "Re-signed for macOS" });
                   clearCompanion(configPath);
-                  msgs.push({ type: "success", text: "Companion data cleared" });
+                  msgs.push({ type: "success", text: "Cleaned up old buddy data" });
                 } catch (err) {
                   msgs.push({ type: "error", text: err.message });
                 }

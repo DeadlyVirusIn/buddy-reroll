@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync, existsSync, copyFileSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, copyFileSync, renameSync, unlinkSync } from "fs";
 import { platform } from "os";
 import { execFileSync } from "child_process";
 import { parseArgs } from "util";
@@ -13,6 +13,7 @@ import {
   RARITY_LABELS,
   RARITY_WEIGHTS,
   SPECIES,
+  STAT_NAMES,
   bruteForce,
   findCurrentSalt,
   matches,
@@ -20,10 +21,14 @@ import {
 } from "./lib/companion.js";
 import { formatDoctorReport, getDoctorReport } from "./lib/doctor.js";
 import { findBinaryPath, findConfigPath, getClaudeBinaryOverride, getPatchability } from "./lib/runtime.js";
+import { parallelBruteForce } from "./lib/finder.js";
+import { estimateAttempts, formatProgress } from "./lib/estimator.js";
+import { installHook, removeHook, storeSalt, readStoredSalt } from "./lib/hooks.js";
 
 const IS_BUN = typeof Bun !== "undefined";
-if (!IS_BUN) {
-  console.warn("⚠ Running without Bun. Brute-force search will be slower. Install Bun for best performance: https://bun.sh");
+const IS_APPLY_HOOK = process.argv.includes("--apply-hook");
+if (!IS_BUN && !IS_APPLY_HOOK) {
+  console.warn("⚠ Running without Bun — searching will be a bit slower. For the speediest experience: https://bun.sh");
 }
 
 function getUserId(configPath) {
@@ -82,9 +87,12 @@ function patchBinary(binaryPath, oldSalt, newSalt) {
   const maxRetries = isWin ? 3 : 1;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      writeFileSync(binaryPath, data);
+      const tmpPath = binaryPath + ".tmp";
+      writeFileSync(tmpPath, data);
+      renameSync(tmpPath, binaryPath);
       return count;
     } catch (err) {
+      try { unlinkSync(binaryPath + ".tmp"); } catch {}
       if (isWin && (err.code === "EACCES" || err.code === "EPERM" || err.code === "EBUSY") && attempt < maxRetries - 1) {
         sleepMs(2000);
         continue;
@@ -123,7 +131,7 @@ function fail(message) {
 function readCurrentCompanion(binaryPath, userId) {
   const binaryData = readFileSync(binaryPath);
   const currentSalt = findCurrentSalt(binaryData);
-  if (!currentSalt) fail("  ✗ Could not find companion salt in binary.");
+  if (!currentSalt) fail("  ✗ Couldn't read your current buddy from the Claude binary.");
   return { currentSalt, currentRoll: rollFrom(currentSalt, userId) };
 }
 
@@ -147,6 +155,17 @@ function buildTargetFromArgs(args) {
     target.hat = args.hat;
   }
   if (args.shiny !== undefined) target.shiny = args.shiny;
+  if (args.peak) {
+    const p = args.peak.toUpperCase();
+    if (!STAT_NAMES.includes(p)) fail(`  ✗ "${args.peak}" isn't a stat. Pick one: ${STAT_NAMES.join(", ")}`);
+    target.peak = p;
+  }
+  if (args.dump) {
+    const d = args.dump.toUpperCase();
+    if (!STAT_NAMES.includes(d)) fail(`  ✗ "${args.dump}" isn't a stat. Pick one: ${STAT_NAMES.join(", ")}`);
+    if (target.peak && d === target.peak) fail("  ✗ Your weakest stat can't be the same as your strongest!");
+    target.dump = d;
+  }
 
   return target;
 }
@@ -191,8 +210,7 @@ function formatCompanionCard(result) {
 async function interactiveMode(binaryPath, configPath, userId) {
   const { currentSalt, currentRoll } = readCurrentCompanion(binaryPath, userId);
 
-  const { runInteractiveUI } = await import("./ui.jsx");
-  await runInteractiveUI({
+  const uiOpts = {
     currentRoll,
     currentSalt,
     binaryPath,
@@ -211,7 +229,16 @@ async function interactiveMode(binaryPath, configPath, userId) {
     RARITY_LABELS,
     EYES,
     HATS,
-  });
+    STAT_NAMES,
+  };
+
+  try {
+    const { runInteractiveUI } = await import("./ui.jsx");
+    await runInteractiveUI(uiOpts);
+  } catch {
+    const { runInteractiveUI } = await import("./ui-fallback.js");
+    await runInteractiveUI(uiOpts);
+  }
 }
 
 // ── Non-interactive mode ─────────────────────────────────────────────────
@@ -234,7 +261,7 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
       fail(`  ✗ ${err.message}`);
     }
 
-    console.log("  ✓ Restored. Restart Claude Code and run /buddy.");
+    console.log("  ✓ Restored! Restart Claude Code and say /buddy to see your original friend.");
     return;
   }
 
@@ -248,25 +275,29 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
   }
 
   const target = buildTargetFromArgs(args);
-  if (Object.keys(target).length === 0) fail("  ✗ Specify at least one target. Use --help for usage.");
+  if (Object.keys(target).length === 0) fail("  ✗ Tell me what kind of buddy you want! Use --help to see options.");
 
-  console.log(`  Target:  ${Object.entries(target).map(([k, v]) => `${k}=${v}`).join(" ")}\n`);
+  const expected = estimateAttempts(target);
+  console.log(`  Target:  ${Object.entries(target).map(([k, v]) => `${k}=${v}`).join(" ")}`);
+  console.log(`  This might take ~${expected.toLocaleString()} tries\n`);
 
   if (matches(currentRoll, target)) {
-    console.log("  ✓ Already matches!\n" + formatCompanionCard(currentRoll));
+    console.log("  ✓ Your buddy already looks like that!\n" + formatCompanionCard(currentRoll));
     return;
   }
 
   const patchability = assertPatchable(binaryPath);
 
   if (isClaudeRunning()) {
-    console.warn("  ⚠ Claude Code appears to be running. Quit it before patching to avoid issues.");
+    console.warn("  ⚠ Claude Code is still running — close it first so the changes stick.");
   }
 
-  console.log("  Searching...");
-  const found = await bruteForce(userId, target, null);
-  if (!found) fail("  ✗ No matching salt found. Try relaxing constraints.");
-  console.log(`  ✓ Found in ${found.checked.toLocaleString()} attempts (${(found.elapsed / 1000).toFixed(1)}s)`);
+  console.log("  Looking for your buddy...");
+  const found = await parallelBruteForce(userId, target, (attempts, elapsed, est, workers) => {
+    process.stdout.write(`\r  ${formatProgress(attempts, elapsed, est, workers)}`);
+  });
+  if (!found) fail("\n  ✗ Couldn't find a match. Try being less picky!");
+  console.log(`\n  ✓ Found it! (${found.checked.toLocaleString()} tries, ${(found.elapsed / 1000).toFixed(1)}s)`);
   console.log(formatCompanionCard(found.result));
 
   const { backupPath } = patchability;
@@ -281,11 +312,12 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
 
   try {
     const patchCount = patchBinary(binaryPath, currentSalt, found.salt);
-    console.log(`  Patched: ${patchCount} occurrence(s)`);
-    if (resignBinary(binaryPath)) console.log("  Signed:  ad-hoc codesign ✓");
+    console.log("  Applied ✓");
+    if (resignBinary(binaryPath)) console.log("  Re-signed for macOS ✓");
     clearCompanion(configPath);
-    console.log("  Config:  companion data cleared");
-    console.log("\n  Done! Restart Claude Code and run /buddy.\n");
+    storeSalt(found.salt);
+    console.log("  Cleaned up old buddy data ✓");
+    console.log("\n  All set! Restart Claude Code and say /buddy to meet your new friend.\n");
   } catch (err) {
     fail(`  ✗ ${err.message}`);
   }
@@ -301,35 +333,91 @@ async function main() {
       eye: { type: "string" },
       hat: { type: "string" },
       shiny: { type: "boolean", default: undefined },
+      peak: { type: "string" },
+      dump: { type: "string" },
       list: { type: "boolean", default: false },
       restore: { type: "boolean", default: false },
       current: { type: "boolean", default: false },
       doctor: { type: "boolean", default: false },
+      version: { type: "boolean", short: "v", default: false },
+      hook: { type: "boolean", default: false },
+      unhook: { type: "boolean", default: false },
+      "apply-hook": { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
     strict: false,
   });
 
+  if (args.version) {
+    const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf-8"));
+    console.log(`buddy-reroll v${pkg.version}`);
+    return;
+  }
+
   if (args.help) {
     console.log(`
-  buddy-reroll — Reroll your Claude Code companion
+  buddy-reroll — Pick the perfect /buddy companion
 
   Usage:
-    bunx buddy-reroll                               Interactive mode (recommended)
-    bunx buddy-reroll --species dragon --rarity legendary --eye ✦ --shiny
-    bunx buddy-reroll --list                        Show all available options
-    bunx buddy-reroll --current                     Show current companion
-    bunx buddy-reroll --doctor                      Diagnose runtime/config discovery
-    bunx buddy-reroll --restore                     Restore original binary
+    buddy-reroll                                     Pick your buddy (interactive)
+    buddy-reroll --species dragon --rarity legendary --eye ✦ --shiny
+    buddy-reroll --list                              See all options
+    buddy-reroll --current                           Show current buddy
+    buddy-reroll --doctor                            Check setup
+    buddy-reroll --restore                           Undo changes
+    buddy-reroll --hook                              Keep my buddy after updates
+    buddy-reroll --unhook                            Stop keeping after updates
 
-  Flags (all optional — omit to leave random):
+  Appearance (all optional — skip to leave random):
     --species <name>    ${SPECIES.join(", ")}
     --rarity <name>     ${RARITIES.join(", ")}
     --eye <char>        ${EYES.join(" ")}
     --hat <name>        ${HATS.join(", ")}
     --shiny / --no-shiny
+
+  Stats (optional):
+    --peak <stat>       Best at: ${STAT_NAMES.join(", ")}
+    --dump <stat>       Worst at (can't match peak)
+
+  Other:
+    --version, -v
 `);
     return;
+  }
+
+  if (args.hook) {
+    const result = installHook();
+    if (result.installed) console.log(`✓ Got it — your buddy will survive Claude updates now.\n  Settings: ${result.path}`);
+    else console.log("  Already set up!");
+    return;
+  }
+
+  if (args.unhook) {
+    const result = removeHook();
+    if (result.removed) console.log("✓ Removed — your buddy won't be kept after updates anymore.");
+    else console.log("  Nothing to remove.");
+    return;
+  }
+
+  if (args["apply-hook"]) {
+    try {
+      const stored = readStoredSalt();
+      if (!stored) process.exit(0);
+      const bp = findBinaryPath();
+      const cp = findConfigPath();
+      if (!bp || !cp) process.exit(0);
+      const uid = getUserId(cp);
+      const binaryData = readFileSync(bp);
+      const currentSalt = findCurrentSalt(binaryData);
+      if (!currentSalt) process.exit(0);
+      if (currentSalt === stored.salt) process.exit(0);
+      const patchability = getPatchability(bp);
+      if (!patchability.ok) process.exit(0);
+      patchBinary(bp, currentSalt, stored.salt);
+      resignBinary(bp);
+      clearCompanion(cp);
+    } catch {}
+    process.exit(0);
   }
 
   if (args.doctor) {
@@ -359,11 +447,11 @@ async function main() {
 
   const userId = getUserId(configPath);
   if (userId === "anon") {
-    console.warn("⚠ No user ID found — using anonymous identity. Roll will change if you log in later.");
+    console.warn("⚠ No user ID found — using anonymous. Your buddy might change when you log in.");
   }
 
-  const hasTargetFlags = args.species || args.rarity || args.eye || args.hat || args.shiny !== undefined;
-  const isCommand = args.restore || args.current || args.doctor;
+  const hasTargetFlags = args.species || args.rarity || args.eye || args.hat || args.shiny !== undefined || args.peak || args.dump;
+  const isCommand = args.restore || args.current || args.doctor || args.hook || args.unhook || args["apply-hook"];
 
   if (!hasTargetFlags && !isCommand) {
     await interactiveMode(binaryPath, configPath, userId);
