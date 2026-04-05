@@ -539,7 +539,14 @@ function App({ opts }) {
                   if (resignBinary(binaryPath)) msgs.push({ type: "success", text: "Re-signed for macOS" });
                   clearCompanion(configPath);
                   if (storeSalt) storeSalt(found.salt);
-                  if (installHook) installHook();
+                  if (installHook) {
+                    try {
+                      const hr = installHook();
+                      if (hr?.installed) msgs.push({ type: "success", text: "Persistence hook installed" });
+                    } catch (hookErr) {
+                      msgs.push({ type: "error", text: `Hook failed: ${hookErr.message}` });
+                    }
+                  }
                   msgs.push({ type: "success", text: "Cleaned up old buddy data" });
                 } catch (err) {
                   msgs.push({ type: "error", text: err.message });

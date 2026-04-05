@@ -23,10 +23,13 @@ import { formatDoctorReport, getDoctorReport } from "./lib/doctor.js";
 import { findBinaryPath, findConfigPath, getClaudeBinaryOverride, getPatchability } from "./lib/runtime.js";
 import { parallelBruteForce } from "./lib/finder.js";
 import { estimateAttempts, formatProgress } from "./lib/estimator.js";
-import { installHook, removeHook, storeSalt, readStoredSalt } from "./lib/hooks.js";
+import { installHook, removeHook, storeSalt, readStoredSalt, hookLog, resolveHookCommand } from "./lib/hooks.js";
 
 const IS_BUN = typeof Bun !== "undefined";
 const IS_APPLY_HOOK = process.argv.includes("--apply-hook");
+
+// Pre-resolve the hook command while import.meta.url is available
+resolveHookCommand(import.meta.url);
 
 if (!IS_BUN && !IS_APPLY_HOOK) {
   try {
@@ -289,7 +292,7 @@ async function interactiveMode(binaryPath, configPath, userId) {
     HATS,
     STAT_NAMES,
     storeSalt,
-    installHook,
+    installHook: (sp) => installHook(sp, import.meta.url),
   };
 
   try {
@@ -381,7 +384,13 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
     if (resignBinary(binaryPath)) console.log("  Re-signed for macOS ✓");
     clearCompanion(configPath);
     storeSalt(found.salt);
-    try { installHook(); } catch {}
+    try {
+      const hookResult = installHook(undefined, import.meta.url);
+      if (hookResult.installed) console.log(`  Persistence hook: ${hookResult.command} ✓`);
+      else console.log(`  Persistence hook: ${hookResult.reason}`);
+    } catch (hookErr) {
+      console.warn(`  ⚠ Hook install failed: ${hookErr.message}`);
+    }
     console.log("  Cleaned up old buddy data ✓");
     console.log("\n  All set! Your buddy will stick around even after Claude updates.\n  Restart Claude Code and say /buddy to meet your new friend.\n");
   } catch (err) {
@@ -451,8 +460,8 @@ async function main() {
   }
 
   if (args.hook) {
-    const result = installHook();
-    if (result.installed) console.log(`✓ Got it — your buddy will survive Claude updates now.\n  Settings: ${result.path}`);
+    const result = installHook(undefined, import.meta.url);
+    if (result.installed) console.log(`✓ Got it — your buddy will survive Claude updates now.\n  Settings: ${result.path}\n  Command:  ${result.command}`);
     else console.log("  Already set up!");
     return;
   }
@@ -467,32 +476,43 @@ async function main() {
   if (args["apply-hook"]) {
     let mutated = false;
     try {
+      hookLog("apply-hook started");
       const stored = readStoredSalt();
-      if (!stored) process.exit(0);
+      if (!stored) { hookLog("no stored salt — nothing to restore"); process.exit(0); }
+      hookLog(`stored salt: ${stored.salt}`);
       const bp = findBinaryPath();
       const cp = findConfigPath();
-      if (!bp || !cp) process.exit(0);
+      if (!bp || !cp) { hookLog(`path resolution failed — binary: ${bp ?? "null"}, config: ${cp ?? "null"}`); process.exit(0); }
+      hookLog(`binary: ${bp}`);
+      hookLog(`config: ${cp}`);
       const binaryData = readFileSync(bp);
       const currentSalt = findCurrentSalt(binaryData);
-      if (!currentSalt) process.exit(0);
-      if (currentSalt === stored.salt) process.exit(0);
+      if (!currentSalt) { hookLog("could not extract salt from binary"); process.exit(0); }
+      hookLog(`current binary salt: ${currentSalt}`);
+      if (currentSalt === stored.salt) { hookLog("salt already matches — buddy is safe"); process.exit(0); }
+      hookLog(`salt MISMATCH — binary="${currentSalt}" stored="${stored.salt}" — patching`);
       const patchability = getPatchability(bp);
-      if (!patchability.ok) process.exit(0);
+      if (!patchability.ok) { hookLog(`binary not patchable: ${patchability.message}`); process.exit(0); }
       const backupPath = patchability.backupPath;
-      if (!existsSync(backupPath)) copyFileSync(bp, backupPath);
+      if (!existsSync(backupPath)) { copyFileSync(bp, backupPath); hookLog(`backup created: ${backupPath}`); }
       patchBinary(bp, currentSalt, stored.salt);
       mutated = true;
+      hookLog("binary patched successfully");
       if (platform() === "darwin") {
         try {
           execFileSync("codesign", ["-s", "-", "--force", bp], { stdio: "ignore", timeout: 30000 });
+          hookLog("macOS re-signed");
         } catch {
+          hookLog("codesign failed — restoring backup");
           copyFileSync(backupPath, bp);
           try { chmodSync(bp, statSync(backupPath).mode); } catch {}
           process.exit(1);
         }
       }
       clearCompanion(cp);
+      hookLog("apply-hook complete — buddy restored");
     } catch (err) {
+      hookLog(`apply-hook FAILED: ${err.message}`);
       process.stderr.write(`buddy-reroll --apply-hook failed: ${err.message}\n`);
       process.exit(mutated ? 1 : 0);
     }

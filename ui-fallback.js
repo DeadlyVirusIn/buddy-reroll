@@ -186,7 +186,14 @@ export async function runInteractiveUI(opts) {
     clearCompanion(configPath);
     console.log("  Cleaned up old buddy data ✓");
     if (storeSalt) storeSalt(found.salt);
-    if (installHook) installHook();
+    if (installHook) {
+      try {
+        const hr = installHook();
+        if (hr?.installed) console.log(`  Persistence hook: ${hr.command} ✓`);
+      } catch (hookErr) {
+        console.log(chalk.yellow(`  ⚠ Hook install failed: ${hookErr.message}`));
+      }
+    }
     console.log(chalk.bold("\n  All set! Your buddy will stick around even after Claude updates.\n  Restart Claude Code and say /buddy to meet your new friend.\n"));
   } catch (err) {
     console.log(chalk.red(`\n✗ ${err.message}`));
